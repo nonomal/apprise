@@ -1,40 +1,44 @@
 # -*- coding: utf-8 -*-
+# BSD 2-Clause License
 #
-# Copyright (C) 2019 Chris Caron <lead2gold@gmail.com>
-# All rights reserved.
+# Apprise - Push Notification Library.
+# Copyright (c) 2024, Chris Caron <lead2gold@gmail.com>
 #
-# This code is licensed under the MIT License.
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
 #
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files(the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and / or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions :
+# 1. Redistributions of source code must retain the above copyright notice,
+#    this list of conditions and the following disclaimer.
 #
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
+# 2. Redistributions in binary form must reproduce the above copyright notice,
+#    this list of conditions and the following disclaimer in the documentation
+#    and/or other materials provided with the distribution.
 #
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-# THE SOFTWARE.
-
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+import copy
 import re
 import sys
 import json
-import contextlib
 import os
-import hashlib
+import binascii
+import platform
+import typing
+import base64
 from itertools import chain
 from os.path import expanduser
 from functools import reduce
 from . import common
 from .logger import logger
-
 from urllib.parse import unquote
 from urllib.parse import quote
 from urllib.parse import urlparse
@@ -43,14 +47,24 @@ from urllib.parse import urlencode as _urlencode
 import importlib.util
 
 
+# A simple path decoder we can re-use which looks after
+# ensuring our file info is expanded correctly when provided
+# a path.
+__PATH_DECODER = os.path.expandvars if \
+    platform.system() == 'Windows' else os.path.expanduser
+
+
+def path_decode(path):
+    """
+    Returns the fully decoded path based on the operating system
+    """
+    return os.path.abspath(__PATH_DECODER(path))
+
+
 def import_module(path, name):
     """
     Load our module based on path
     """
-    # if path.endswith('test_module_detection0/a/hook.py'):
-    #     import pdb
-    #     pdb.set_trace()
-
     spec = importlib.util.spec_from_file_location(name, path)
     try:
         module = importlib.util.module_from_spec(spec)
@@ -60,19 +74,21 @@ def import_module(path, name):
 
     except Exception as e:
         # module isn't loadable
-        del sys.modules[name]
+        try:
+            del sys.modules[name]
+
+        except KeyError:
+            # nothing to clean up
+            pass
+
         module = None
 
         logger.debug(
-            'Custom module exception raised from %s (name=%s) %s',
+            'Module exception raised from %s (name=%s) %s',
             path, name, str(e))
 
     return module
 
-
-# Hash of all paths previously scanned so we don't waste effort/overhead doing
-# it again
-PATHS_PREVIOUSLY_SCANNED = set()
 
 # URL Indexing Table for returns via parse_url()
 # The below accepts and scans for:
@@ -89,6 +105,9 @@ VALID_QUERY_RE = re.compile(r'^(?P<path>.*[/\\])(?P<query>[^/\\]+)?$')
 # delimiters used to separate values when content is passed in by string.
 # This is useful when turning a string into a list
 STRING_DELIMITERS = r'[\[\]\;,\s]+'
+
+# String Delimiters without the whitespace
+STRING_DELIMITERS_NO_WS = r'[\[\]\;,]+'
 
 # Pre-Escape content since we reference it so much
 ESCAPED_PATH_SEPARATOR = re.escape('\\/')
@@ -133,14 +152,14 @@ NOTIFY_CUSTOM_DEL_TOKENS = re.compile(r'^-(?P<key>.*)\s*')
 NOTIFY_CUSTOM_COLON_TOKENS = re.compile(r'^:(?P<key>.*)\s*')
 
 # Used for attempting to acquire the schema if the URL can't be parsed.
-GET_SCHEMA_RE = re.compile(r'\s*(?P<schema>[a-z0-9]{2,9})://.*$', re.I)
+GET_SCHEMA_RE = re.compile(r'\s*(?P<schema>[a-z0-9]{1,12})://.*$', re.I)
 
 # Used for validating that a provided entry is indeed a schema
 # this is slightly different then the GET_SCHEMA_RE above which
 # insists the schema is only valid with a :// entry.  this one
 # extrapolates the individual entries
 URL_DETAILS_RE = re.compile(
-    r'\s*(?P<schema>[a-z0-9]{2,9})(://(?P<base>.*))?$', re.I)
+    r'\s*(?P<schema>[a-z0-9]{1,12})(://(?P<base>.*))?$', re.I)
 
 # Regular expression based and expanded from:
 # http://www.regular-expressions.info/email.html
@@ -171,6 +190,11 @@ IS_PHONE_NO = re.compile(r'^\+?(?P<phone>[0-9\s)(+-]+)\s*$')
 PHONE_NO_DETECTION_RE = re.compile(
     r'\s*([+(\s]*[0-9][0-9()\s-]+[0-9])(?=$|[\s,+(]+[0-9])', re.I)
 
+# Support for prefix: (string followed by colon) infront of phone no
+PHONE_NO_WPREFIX_DETECTION_RE = re.compile(
+    r'\s*((?:[a-z]+:)?[+(\s]*[0-9][0-9()\s-]+[0-9])'
+    r'(?=$|(?:[a-z]+:)?[\s,+(]+[0-9])', re.I)
+
 # A simple verification check to make sure the content specified
 # rougly conforms to a ham radio call sign before we parse it further
 IS_CALL_SIGN = re.compile(
@@ -184,7 +208,7 @@ CALL_SIGN_DETECTION_RE = re.compile(
 
 # Regular expression used to destinguish between multiple URLs
 URL_DETECTION_RE = re.compile(
-    r'([a-z0-9]+?:\/\/.*?)(?=$|[\s,]+[a-z0-9]{2,9}?:\/\/)', re.I)
+    r'([a-z0-9]+?:\/\/.*?)(?=$|[\s,]+[a-z0-9]{1,12}?:\/\/)', re.I)
 
 EMAIL_DETECTION_RE = re.compile(
     r'[\s,]*([^@]+@.*?)(?=$|[\s,]+'
@@ -197,9 +221,28 @@ UUID4_RE = re.compile(
     r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}',
     re.IGNORECASE)
 
+# Validate if we're a loadable Python file or not
+VALID_PYTHON_FILE_RE = re.compile(r'.+\.py(o|c)?$', re.IGNORECASE)
+
 # validate_regex() utilizes this mapping to track and re-use pre-complied
 # regular expressions
 REGEX_VALIDATE_LOOKUP = {}
+
+
+class Singleton(type):
+    """
+    Our Singleton MetaClass
+    """
+    _instances = {}
+
+    def __call__(cls, *args, **kwargs):
+        """
+        instantiate our singleton meta entry
+        """
+        if cls not in cls._instances:
+            # we have not every built an instance before.  Build one now.
+            cls._instances[cls] = super().__call__(*args, **kwargs)
+        return cls._instances[cls]
 
 
 class TemplateType:
@@ -282,7 +325,7 @@ def is_hostname(hostname, ipv4=True, ipv6=True, underscore=True):
     labels = hostname.split(".")
 
     # ipv4 check
-    if len(labels) == 4 and re.match(r'[0-9.]+', hostname):
+    if len(labels) == 4 and re.match(r'^[0-9.]+$', hostname):
         return is_ipaddr(hostname, ipv4=ipv4, ipv6=False)
 
     # - RFC 1123 permits hostname labels to start with digits
@@ -519,7 +562,7 @@ def tidy_path(path):
     return path
 
 
-def parse_qsd(qs, simple=False):
+def parse_qsd(qs, simple=False, plus_to_space=False, sanitize=True):
     """
     Query String Dictionary Builder
 
@@ -541,6 +584,13 @@ def parse_qsd(qs, simple=False):
 
     if simple is set to true, then a ONE dictionary is returned and is not
     sub-parsed for additional elements
+
+    plus_to_space will cause all `+` references to become a space as
+    per normal URL Encoded defininition. Normal URL parsing applies
+    this, but `+` is very actively used character with passwords,
+    api keys, tokens, etc.  So Apprise does not do this by default.
+
+    if sanitize is set to False, then kwargs are not placed into lowercase
     """
 
     # Our return result set:
@@ -575,13 +625,13 @@ def parse_qsd(qs, simple=False):
         key = unquote(key)
         key = '' if not key else key
 
-        val = nv[1].replace('+', ' ')
+        val = nv[1].replace('+', ' ') if plus_to_space else nv[1]
         val = unquote(val)
         val = '' if not val else val.strip()
 
         # Always Query String Dictionary (qsd) for every entry we have
         # content is always made lowercase for easy indexing
-        result['qsd'][key.lower().strip()] = val
+        result['qsd'][key.lower().strip() if sanitize else key] = val
 
         if simple:
             # move along
@@ -609,7 +659,7 @@ def parse_qsd(qs, simple=False):
 
 
 def parse_url(url, default_schema='http', verify_host=True, strict_port=False,
-              simple=False):
+              simple=False, plus_to_space=False, sanitize=True):
     """A function that greatly simplifies the parsing of a url
     specified by the end user.
 
@@ -664,6 +714,8 @@ def parse_url(url, default_schema='http', verify_host=True, strict_port=False,
 
      If the URL can't be parsed then None is returned
 
+     If sanitize is set to False, then kwargs are not placed in lowercase
+     and wrapping whitespace is not removed
     """
 
     if not isinstance(url, str):
@@ -722,7 +774,9 @@ def parse_url(url, default_schema='http', verify_host=True, strict_port=False,
     # Parse Query Arugments ?val=key&key=val
     # while ensuring that all keys are lowercase
     if qsdata:
-        result.update(parse_qsd(qsdata, simple=simple))
+        result.update(parse_qsd(
+            qsdata, simple=simple, plus_to_space=plus_to_space,
+            sanitize=sanitize))
 
     # Now do a proper extraction of data; http:// is just substitued in place
     # to allow urlparse() to function as expected, we'll swap this back to the
@@ -906,7 +960,7 @@ def parse_bool(arg, default=False):
     return bool(arg)
 
 
-def parse_phone_no(*args, store_unparseable=True, **kwargs):
+def parse_phone_no(*args, store_unparseable=True, prefix=False, **kwargs):
     """
     Takes a string containing phone numbers separated by comma's and/or spaces
     and returns a list.
@@ -915,7 +969,8 @@ def parse_phone_no(*args, store_unparseable=True, **kwargs):
     result = []
     for arg in args:
         if isinstance(arg, str) and arg:
-            _result = PHONE_NO_DETECTION_RE.findall(arg)
+            _result = (PHONE_NO_DETECTION_RE if not prefix
+                       else PHONE_NO_WPREFIX_DETECTION_RE).findall(arg)
             if _result:
                 result += _result
 
@@ -933,7 +988,7 @@ def parse_phone_no(*args, store_unparseable=True, **kwargs):
         elif isinstance(arg, (set, list, tuple)):
             # Use recursion to handle the list of phone numbers
             result += parse_phone_no(
-                *arg, store_unparseable=store_unparseable)
+                *arg, store_unparseable=store_unparseable, prefix=prefix)
 
     return result
 
@@ -1101,7 +1156,7 @@ def urlencode(query, doseq=False, safe='', encoding=None, errors=None):
         errors=errors)
 
 
-def parse_list(*args):
+def parse_list(*args, cast=None, allow_whitespace=True):
     """
     Take a string list and break it into a delimited
     list of arguments. This funciton also supports
@@ -1124,11 +1179,16 @@ def parse_list(*args):
 
     result = []
     for arg in args:
+        if not isinstance(arg, (str, set, list, bool, tuple)) and arg and cast:
+            arg = cast(arg)
+
         if isinstance(arg, str):
-            result += re.split(STRING_DELIMITERS, arg)
+            result += re.split(
+                STRING_DELIMITERS if allow_whitespace
+                else STRING_DELIMITERS_NO_WS, arg)
 
         elif isinstance(arg, (set, list, tuple)):
-            result += parse_list(*arg)
+            result += parse_list(*arg, allow_whitespace=allow_whitespace)
 
     #
     # filter() eliminates any empty entries
@@ -1136,8 +1196,9 @@ def parse_list(*args):
     # Since Python v3 returns a filter (iterator) whereas Python v2 returned
     # a list, we need to change it into a list object to remain compatible with
     # both distribution types.
-    # TODO: Review after dropping support for Python 2.
-    return sorted([x for x in filter(bool, list(set(result)))])
+    return sorted([x for x in filter(bool, list(set(result)))]) \
+        if allow_whitespace else sorted(
+            [x.strip() for x in filter(bool, list(set(result))) if x.strip()])
 
 
 def is_exclusive_match(logic, data, match_all=common.MATCH_ALL_TAG,
@@ -1455,32 +1516,6 @@ def cwe312_url(url):
     )
 
 
-@contextlib.contextmanager
-def environ(*remove, **update):
-    """
-    Temporarily updates the ``os.environ`` dictionary in-place.
-
-    The ``os.environ`` dictionary is updated in-place so that the modification
-    is sure to work in all situations.
-
-    :param remove: Environment variable(s) to remove.
-    :param update: Dictionary of environment variables and values to
-                   add/update.
-    """
-
-    # Create a backup of our environment for restoration purposes
-    env_orig = os.environ.copy()
-
-    try:
-        os.environ.update(update)
-        [os.environ.pop(k, None) for k in remove]
-        yield
-
-    finally:
-        # Restore our snapshot
-        os.environ = env_orig.copy()
-
-
 def apply_template(template, app_mode=TemplateType.RAW, **kwargs):
     """
     Takes a template in a str format and applies all of the keywords
@@ -1530,137 +1565,6 @@ def remove_suffix(value, suffix):
     return value[:-len(suffix)] if value.endswith(suffix) else value
 
 
-def module_detection(paths, cache=True):
-    """
-    Iterates over a defined path for apprise decorators to load such as
-    @notify.
-
-    """
-
-    # A simple restriction that we don't allow periods in the filename at all
-    # so it can't be hidden (Linux OS's) and it won't conflict with Python
-    # path naming.  This also prevents us from loading any python file that
-    # starts with an underscore or dash
-    # We allow __init__.py as well
-    module_re = re.compile(
-        r'^(?P<name>[_a-z0-9][a-z0-9._-]+)?(\.py)?$', re.I)
-
-    if isinstance(paths, str):
-        paths = [paths, ]
-
-    if not paths or not isinstance(paths, (tuple, list)):
-        # We're done
-        return None
-
-    def _import_module(path):
-        # Since our plugin name can conflict (as a module) with another
-        # we want to generate random strings to avoid steping on
-        # another's namespace
-        module_name = hashlib.sha1(path.encode('utf-8')).hexdigest()
-        module_pyname = "{prefix}.{name}".format(
-            prefix='apprise.custom.module', name=module_name)
-
-        if module_pyname in common.NOTIFY_CUSTOM_MODULE_MAP:
-            # First clear out existing entries
-            for schema in common.\
-                    NOTIFY_CUSTOM_MODULE_MAP[module_pyname]['notify'] \
-                    .keys():
-                # Remove any mapped modules to this file
-                del common.NOTIFY_SCHEMA_MAP[schema]
-
-            # Reset
-            del common.NOTIFY_CUSTOM_MODULE_MAP[module_pyname]
-
-        # Load our module
-        module = import_module(path, module_pyname)
-        if not module:
-            # No problem, we can't use this object
-            logger.warning('Failed to load custom module: %s', _path)
-            return None
-
-        # Print our loaded modules if any
-        if module_pyname in common.NOTIFY_CUSTOM_MODULE_MAP:
-            logger.debug(
-                'Loaded custom module: %s (name=%s)',
-                _path, module_name)
-
-            for schema, meta in common.\
-                    NOTIFY_CUSTOM_MODULE_MAP[module_pyname]['notify']\
-                    .items():
-
-                logger.info('Loaded custom notification: %s://', schema)
-        else:
-            # The code reaches here if we successfully loaded the Python
-            # module but no hooks/triggers were found. So we can safely
-            # just remove/ignore this entry
-            del sys.modules[module_pyname]
-            return None
-
-        # end of _import_module()
-        return None
-
-    for _path in paths:
-        path = os.path.abspath(os.path.expanduser(_path))
-        if (cache and path in PATHS_PREVIOUSLY_SCANNED) \
-                or not os.path.exists(path):
-            # We're done as we've already scanned this
-            continue
-
-        # Store our path as a way of hashing it has been handled
-        PATHS_PREVIOUSLY_SCANNED.add(path)
-
-        if os.path.isdir(path) and not \
-                os.path.isfile(os.path.join(path, '__init__.py')):
-
-            logger.debug('Scanning for custom plugins in: %s', path)
-            for entry in os.listdir(path):
-                re_match = module_re.match(entry)
-                if not re_match:
-                    # keep going
-                    logger.trace('Plugin Scan: Ignoring %s', entry)
-                    continue
-
-                new_path = os.path.join(path, entry)
-                if os.path.isdir(new_path):
-                    # Update our path
-                    new_path = os.path.join(path, entry, '__init__.py')
-                    if not os.path.isfile(new_path):
-                        logger.trace(
-                            'Plugin Scan: Ignoring %s',
-                            os.path.join(path, entry))
-                        continue
-
-                if not cache or \
-                        (cache and new_path not in PATHS_PREVIOUSLY_SCANNED):
-                    # Load our module
-                    _import_module(new_path)
-
-                    # Add our subdir path
-                    PATHS_PREVIOUSLY_SCANNED.add(new_path)
-        else:
-            if os.path.isdir(path):
-                # This logic is safe to apply because we already validated
-                # the directories state above; update our path
-                path = os.path.join(path, '__init__.py')
-                if cache and path in PATHS_PREVIOUSLY_SCANNED:
-                    continue
-
-                PATHS_PREVIOUSLY_SCANNED.add(path)
-
-            # directly load as is
-            re_match = module_re.match(os.path.basename(path))
-            # must be a match and must have a .py extension
-            if not re_match or not re_match.group(1):
-                # keep going
-                logger.trace('Plugin Scan: Ignoring %s', path)
-                continue
-
-            # Load our module
-            _import_module(path)
-
-        return None
-
-
 def dict_full_update(dict1, dict2):
     """
     Takes 2 dictionaries (dict1 and dict2) that contain sub-dictionaries and
@@ -1679,3 +1583,146 @@ def dict_full_update(dict1, dict2):
 
     _merge(dict1, dict2)
     return
+
+
+def dir_size(path, max_depth=3, missing_okay=True, _depth=0, _errors=None):
+    """
+    Scans a provided path an returns it's size (in bytes) of path provided
+    """
+
+    if _errors is None:
+        _errors = set()
+
+    if _depth > max_depth:
+        _errors.add(path)
+        return (0, _errors)
+
+    total = 0
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                try:
+                    if entry.is_file(follow_symlinks=False):
+                        total += entry.stat(follow_symlinks=False).st_size
+
+                    elif entry.is_dir(follow_symlinks=False):
+                        (totals, _) = dir_size(
+                            entry.path,
+                            max_depth=max_depth,
+                            _depth=_depth + 1,
+                            _errors=_errors)
+                        total += totals
+
+                except FileNotFoundError:
+                    # no worries; Nothing to do
+                    continue
+
+                except (OSError, IOError) as e:
+                    # Permission error of some kind or disk problem...
+                    # There is nothing we can do at this point
+                    _errors.add(entry.path)
+                    logger.warning(
+                        'dir_size detetcted inaccessible path: %s',
+                        os.fsdecode(entry.path))
+                    logger.debug('dir_size Exception: %s' % str(e))
+                    continue
+
+    except FileNotFoundError:
+        if not missing_okay:
+            # Conditional error situation
+            _errors.add(path)
+
+    except (OSError, IOError) as e:
+        # Permission error of some kind or disk problem...
+        # There is nothing we can do at this point
+        _errors.add(path)
+        logger.warning(
+            'dir_size detetcted inaccessible path: %s',
+            os.fsdecode(path))
+        logger.debug('dir_size Exception: %s' % str(e))
+
+    return (total, _errors)
+
+
+def bytes_to_str(value):
+    """
+    Covert an integer (in bytes) into it's string representation with
+    acompanied unit value (such as B, KB, MB, GB, TB, etc)
+    """
+    unit = 'B'
+    try:
+        value = float(value)
+
+    except (ValueError, TypeError):
+        return None
+
+    if value >= 1024.0:
+        value = value / 1024.0
+        unit = 'KB'
+        if value >= 1024.0:
+            value = value / 1024.0
+            unit = 'MB'
+            if value >= 1024.0:
+                value = value / 1024.0
+                unit = 'GB'
+                if value >= 1024.0:
+                    value = value / 1024.0
+                    unit = 'TB'
+
+    return '%.2f%s' % (round(value, 2), unit)
+
+
+def decode_b64_dict(di: dict) -> dict:
+    """
+    decodes base64 dictionary previously encoded
+
+    string entries prefixed with `b64:` are targeted
+    """
+    di = copy.deepcopy(di)
+    for k, v in di.items():
+        if not isinstance(v, str) or not v.startswith("b64:"):
+            continue
+
+        try:
+            parsed_v = base64.b64decode(v[4:])
+            parsed_v = json.loads(parsed_v)
+
+        except (ValueError, TypeError, binascii.Error,
+                json.decoder.JSONDecodeError):
+            # ValueError: the length of altchars is not 2.
+            # TypeError: invalid input
+            # binascii.Error: not base64 (bad padding)
+            # json.decoder.JSONDecodeError: Bad JSON object
+
+            parsed_v = v
+        di[k] = parsed_v
+    return di
+
+
+def encode_b64_dict(di: dict, encoding='utf-8') -> typing.Tuple[dict, bool]:
+    """
+    Encodes dictionary entries containing binary types (int, float) into base64
+
+    Final product is always string based values
+    """
+    di = copy.deepcopy(di)
+    needs_decoding = False
+    for k, v in di.items():
+        if isinstance(v, str):
+            continue
+
+        try:
+            encoded = base64.urlsafe_b64encode(json.dumps(v).encode(encoding))
+            encoded = "b64:{}".format(encoded.decode(encoding))
+            needs_decoding = True
+
+        except (ValueError, TypeError):
+            # ValueError:
+            #  - the length of altchars is not 2.
+            # TypeError:
+            #  - json not searializable or
+            #  - bytes object not passed into urlsafe_b64encode()
+            encoded = str(v)
+
+        di[k] = encoded
+    return di, needs_decoding

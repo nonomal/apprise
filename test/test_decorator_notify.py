@@ -1,39 +1,48 @@
 # -*- coding: utf-8 -*-
+# BSD 2-Clause License
 #
-# Copyright (C) 2022 Chris Caron <lead2gold@gmail.com>
-# All rights reserved.
+# Apprise - Push Notification Library.
+# Copyright (c) 2024, Chris Caron <lead2gold@gmail.com>
 #
-# This code is licensed under the MIT License.
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
 #
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files(the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and / or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions :
+# 1. Redistributions of source code must retain the above copyright notice,
+#    this list of conditions and the following disclaimer.
 #
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
+# 2. Redistributions in binary form must reproduce the above copyright notice,
+#    this list of conditions and the following disclaimer in the documentation
+#    and/or other materials provided with the distribution.
 #
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-# THE SOFTWARE.
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
+
 from os.path import dirname
 from os.path import join
 from apprise.decorators import notify
+from apprise.decorators.base import CustomNotifyPlugin
 from apprise import Apprise
 from apprise import AppriseConfig
 from apprise import AppriseAsset
 from apprise import AppriseAttachment
 from apprise import common
+from apprise import NotificationManager
 
 # Disable logging for a cleaner testing output
 import logging
 logging.disable(logging.CRITICAL)
+
+# Grant access to our Notification Manager Singleton
+N_MGR = NotificationManager()
 
 TEST_VAR_DIR = join(dirname(__file__), 'var')
 
@@ -44,7 +53,7 @@ def test_notify_simple_decoration():
 
     # Verify our schema we're about to declare doesn't already exist
     # in our schema map:
-    assert 'utiltest' not in common.NOTIFY_SCHEMA_MAP
+    assert 'utiltest' not in N_MGR
 
     verify_obj = {}
 
@@ -52,6 +61,16 @@ def test_notify_simple_decoration():
     @notify(on="utiltest", name="Apprise @notify Decorator Testing")
     def my_inline_notify_wrapper(
             body, title, notify_type, attach, *args, **kwargs):
+
+        # Test our body (always present)
+        assert isinstance(body, str)
+
+        # Ensure content is of type utf-8
+        assert isinstance(body.encode('utf-8'), bytes)
+
+        if attach:
+            # attachment is always of type AppriseAttach
+            assert isinstance(attach, AppriseAttachment)
 
         # Populate our object we can use to validate
         verify_obj.update({
@@ -64,7 +83,7 @@ def test_notify_simple_decoration():
         })
 
     # Now after our hook being inline... it's been loaded
-    assert 'utiltest' in common.NOTIFY_SCHEMA_MAP
+    assert 'utiltest' in N_MGR
 
     # Create ourselves an apprise object
     aobj = Apprise()
@@ -89,6 +108,108 @@ def test_notify_simple_decoration():
     assert verify_obj['notify_type'] == common.NotifyType.INFO
     assert isinstance(verify_obj['attach'], AppriseAttachment)
     assert len(verify_obj['attach']) == 2
+
+    # No format was defined
+    assert 'body_format' in verify_obj['kwargs']
+    assert verify_obj['kwargs']['body_format'] is None
+
+    # The meta argument allows us to further parse the URL parameters
+    # specified
+    assert isinstance(verify_obj['kwargs'], dict)
+    assert 'meta' in verify_obj['kwargs']
+    assert isinstance(verify_obj['kwargs']['meta'], dict)
+    assert len(verify_obj['kwargs']['meta']) == 4
+    assert 'tag' in verify_obj['kwargs']['meta']
+
+    assert 'asset' in verify_obj['kwargs']['meta']
+    assert isinstance(verify_obj['kwargs']['meta']['asset'], AppriseAsset)
+
+    assert verify_obj['kwargs']['meta']['schema'] == 'utiltest'
+    assert verify_obj['kwargs']['meta']['url'] == 'utiltest://'
+
+    # Reset our verify object (so it can be populated again)
+    verify_obj = {}
+
+    # Send unicode
+    assert aobj.notify("ツ".encode('utf-8')) is True
+    # Our content was populated after the notify() call
+    assert len(verify_obj) > 0
+    assert verify_obj['body'] == "ツ"  # content comes back as str (utf-8)
+    assert verify_obj['title'] == ''
+    assert verify_obj['notify_type'] == common.NotifyType.INFO
+    assert verify_obj['attach'] is None
+
+    # No format was defined
+    assert 'body_format' in verify_obj['kwargs']
+    assert verify_obj['kwargs']['body_format'] is None
+
+    # The meta argument allows us to further parse the URL parameters
+    # specified
+    assert isinstance(verify_obj['kwargs'], dict)
+    assert 'meta' in verify_obj['kwargs']
+    assert isinstance(verify_obj['kwargs']['meta'], dict)
+    assert len(verify_obj['kwargs']['meta']) == 4
+    assert 'tag' in verify_obj['kwargs']['meta']
+
+    assert 'asset' in verify_obj['kwargs']['meta']
+    assert isinstance(verify_obj['kwargs']['meta']['asset'], AppriseAsset)
+
+    assert verify_obj['kwargs']['meta']['schema'] == 'utiltest'
+    assert verify_obj['kwargs']['meta']['url'] == 'utiltest://'
+
+    # Reset our verify object (so it can be populated again)
+    verify_obj = {}
+
+    # Send utf-8 string
+    assert aobj.notify("ツ") is True
+
+    assert len(verify_obj) > 0
+    assert verify_obj['body'] == "ツ"  # content comes back as str (utf-8)
+    assert verify_obj['title'] == ''
+    assert verify_obj['notify_type'] == common.NotifyType.INFO
+    assert verify_obj['attach'] is None
+
+    # No format was defined
+    assert 'body_format' in verify_obj['kwargs']
+    assert verify_obj['kwargs']['body_format'] is None
+
+    # The meta argument allows us to further parse the URL parameters
+    # specified
+    assert isinstance(verify_obj['kwargs'], dict)
+    assert 'meta' in verify_obj['kwargs']
+    assert isinstance(verify_obj['kwargs']['meta'], dict)
+    assert len(verify_obj['kwargs']['meta']) == 4
+    assert 'tag' in verify_obj['kwargs']['meta']
+
+    assert 'asset' in verify_obj['kwargs']['meta']
+    assert isinstance(verify_obj['kwargs']['meta']['asset'], AppriseAsset)
+
+    assert verify_obj['kwargs']['meta']['schema'] == 'utiltest'
+    assert verify_obj['kwargs']['meta']['url'] == 'utiltest://'
+
+    # Some cases that will fail internal validation:
+    # - No Body
+    assert aobj.notify('') is False
+    # - Title only
+    assert aobj.notify('', title="hello world!") is False
+
+    # Reset our verify object (so it can be populated again)
+    verify_obj = {}
+
+    # No Body but has attachment (valid)
+    assert aobj.notify(
+        '',
+        attach=(
+            join(TEST_VAR_DIR, 'apprise-test.png'),
+        )) is True
+
+    # Our content was populated after the notify() call
+    assert len(verify_obj) > 0
+    assert verify_obj['body'] == ""
+    assert verify_obj['title'] == ""
+    assert verify_obj['notify_type'] == common.NotifyType.INFO
+    assert isinstance(verify_obj['attach'], AppriseAttachment)
+    assert len(verify_obj['attach']) == 1
 
     # No format was defined
     assert 'body_format' in verify_obj['kwargs']
@@ -142,7 +263,7 @@ def test_notify_simple_decoration():
     assert verify_obj['kwargs']['meta']['schema'] == 'utiltest'
     assert verify_obj['kwargs']['meta']['url'] == 'utiltest://'
 
-    assert 'notexc' not in common.NOTIFY_SCHEMA_MAP
+    assert 'notexc' not in N_MGR
 
     # Define a function here on the spot
     @notify(on="notexc", name="Apprise @notify Exception Handling")
@@ -150,7 +271,7 @@ def test_notify_simple_decoration():
             body, title, notify_type, attach, *args, **kwargs):
         raise ValueError("An exception was thrown!")
 
-    assert 'notexc' in common.NOTIFY_SCHEMA_MAP
+    assert 'notexc' in N_MGR
 
     # Create ourselves an apprise object
     aobj = Apprise()
@@ -161,8 +282,7 @@ def test_notify_simple_decoration():
     assert aobj.notify("Exceptions will be thrown!") is False
 
     # Tidy
-    del common.NOTIFY_SCHEMA_MAP['utiltest']
-    del common.NOTIFY_SCHEMA_MAP['notexc']
+    N_MGR.remove('utiltest', 'notexc')
 
 
 def test_notify_complex_decoration():
@@ -171,7 +291,7 @@ def test_notify_complex_decoration():
 
     # Verify our schema we're about to declare doesn't already exist
     # in our schema map:
-    assert 'utiltest' not in common.NOTIFY_SCHEMA_MAP
+    assert 'utiltest' not in N_MGR
 
     verify_obj = {}
 
@@ -192,7 +312,7 @@ def test_notify_complex_decoration():
         })
 
     # Now after our hook being inline... it's been loaded
-    assert 'utiltest' in common.NOTIFY_SCHEMA_MAP
+    assert 'utiltest' in N_MGR
 
     # Create ourselves an apprise object
     aobj = Apprise()
@@ -308,7 +428,7 @@ def test_notify_complex_decoration():
     assert 'key2=another' in verify_obj['kwargs']['meta']['url']
 
     # Tidy
-    del common.NOTIFY_SCHEMA_MAP['utiltest']
+    N_MGR.remove('utiltest')
 
 
 def test_notify_multi_instance_decoration(tmpdir):
@@ -317,7 +437,7 @@ def test_notify_multi_instance_decoration(tmpdir):
 
     # Verify our schema we're about to declare doesn't already exist
     # in our schema map:
-    assert 'multi' not in common.NOTIFY_SCHEMA_MAP
+    assert 'multi' not in N_MGR
 
     verify_obj = []
 
@@ -325,6 +445,8 @@ def test_notify_multi_instance_decoration(tmpdir):
     @notify(on="multi", name="Apprise @notify Decorator Testing")
     def my_inline_notify_wrapper(
             body, title, notify_type, attach, meta, *args, **kwargs):
+
+        assert isinstance(body, str)
 
         # Track what is added
         verify_obj.append({
@@ -338,13 +460,13 @@ def test_notify_multi_instance_decoration(tmpdir):
         })
 
     # Now after our hook being inline... it's been loaded
-    assert 'multi' in common.NOTIFY_SCHEMA_MAP
+    assert 'multi' in N_MGR
 
     # Prepare our config
     t = tmpdir.mkdir("multi-test").join("apprise.yml")
     t.write("""urls:
     - multi://user1:pass@hostname
-    - multi://user2:pass2@hostname
+    - multi://user2:pass2@hostname?verify=no
     """)
 
     # Create ourselves a config object
@@ -365,7 +487,8 @@ def test_notify_multi_instance_decoration(tmpdir):
     # Nothing stored yet in our object
     assert len(verify_obj) == 0
 
-    assert aobj.notify("Hello World", title="My Title") is True
+    # Send utf-8 characters
+    assert aobj.notify("ツ".encode('utf-8'), title="My Title") is True
 
     assert len(verify_obj) == 2
 
@@ -376,7 +499,7 @@ def test_notify_multi_instance_decoration(tmpdir):
 
     # Our content was populated after the notify() call
     obj = verify_obj[0]
-    assert obj['body'] == "Hello World"
+    assert obj['body'] == "ツ"
     assert obj['title'] == "My Title"
     assert obj['notify_type'] == common.NotifyType.INFO
 
@@ -397,11 +520,12 @@ def test_notify_multi_instance_decoration(tmpdir):
     assert 'tag' in meta
     assert isinstance(meta['tag'], set)
 
-    assert len(meta) == 7
+    assert len(meta) == 8
     # We carry all of our default arguments from the @notify's initialization
     assert meta['schema'] == 'multi'
     assert meta['host'] == 'hostname'
     assert meta['user'] == 'user1'
+    assert meta['verify'] is True
     assert meta['password'] == 'pass'
 
     # Verify our URL is correct
@@ -413,7 +537,7 @@ def test_notify_multi_instance_decoration(tmpdir):
 
     # Our content was populated after the notify() call
     obj = verify_obj[1]
-    assert obj['body'] == "Hello World"
+    assert obj['body'] == "ツ"
     assert obj['title'] == "My Title"
     assert obj['notify_type'] == common.NotifyType.INFO
 
@@ -434,15 +558,24 @@ def test_notify_multi_instance_decoration(tmpdir):
     assert 'tag' in meta
     assert isinstance(meta['tag'], set)
 
-    assert len(meta) == 7
+    assert len(meta) == 9
     # We carry all of our default arguments from the @notify's initialization
     assert meta['schema'] == 'multi'
     assert meta['host'] == 'hostname'
     assert meta['user'] == 'user2'
     assert meta['password'] == 'pass2'
+    assert meta['verify'] is False
+    assert meta['qsd']['verify'] == 'no'
 
     # Verify our URL is correct
-    assert meta['url'] == 'multi://user2:pass2@hostname'
+    assert meta['url'] == 'multi://user2:pass2@hostname?verify=no'
 
     # Tidy
-    del common.NOTIFY_SCHEMA_MAP['multi']
+    N_MGR.remove('multi')
+
+
+def test_custom_notify_plugin_decoration():
+    """decorators: CustomNotifyPlugin testing
+    """
+
+    CustomNotifyPlugin()

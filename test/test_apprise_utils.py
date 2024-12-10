@@ -1,37 +1,40 @@
 # -*- coding: utf-8 -*-
+# BSD 2-Clause License
 #
-# Copyright (C) 2019 Chris Caron <lead2gold@gmail.com>
-# All rights reserved.
+# Apprise - Push Notification Library.
+# Copyright (c) 2024, Chris Caron <lead2gold@gmail.com>
 #
-# This code is licensed under the MIT License.
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
 #
-# Permission is hereby granted, free of charge, to any person obtaining a copy
-# of this software and associated documentation files(the "Software"), to deal
-# in the Software without restriction, including without limitation the rights
-# to use, copy, modify, merge, publish, distribute, sublicense, and / or sell
-# copies of the Software, and to permit persons to whom the Software is
-# furnished to do so, subject to the following conditions :
+# 1. Redistributions of source code must retain the above copyright notice,
+#    this list of conditions and the following disclaimer.
 #
-# The above copyright notice and this permission notice shall be included in
-# all copies or substantial portions of the Software.
+# 2. Redistributions in binary form must reproduce the above copyright notice,
+#    this list of conditions and the following disclaimer in the documentation
+#    and/or other materials provided with the distribution.
 #
-# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE
-# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-# THE SOFTWARE.
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+# LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+# CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+# SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+# INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+# CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+# POSSIBILITY OF SUCH DAMAGE.
 
-from __future__ import print_function
 import re
 import os
 import sys
+from unittest import mock
 from inspect import cleandoc
 from urllib.parse import unquote
 
 from apprise import utils
-from apprise import common
+from apprise import NotificationManager
 
 # Disable logging for a cleaner testing output
 import logging
@@ -40,12 +43,15 @@ logging.disable(logging.CRITICAL)
 # Ensure we don't create .pyc files for these tests
 sys.dont_write_bytecode = True
 
+# Grant access to our Notification Manager Singleton
+N_MGR = NotificationManager()
+
 
 def test_parse_qsd():
     "utils: parse_qsd() testing """
 
     result = utils.parse_qsd('a=1&b=&c&d=abcd')
-    assert isinstance(result, dict) is True
+    assert isinstance(result, dict)
     assert len(result) == 4
     assert 'qsd' in result
     assert 'qsd+' in result
@@ -76,6 +82,22 @@ def test_parse_url_general():
     assert result['path'] is None
     assert result['query'] is None
     assert result['url'] == 'http://hostname'
+    assert result['qsd'] == {}
+    assert result['qsd-'] == {}
+    assert result['qsd+'] == {}
+    assert result['qsd:'] == {}
+
+    # GitHub Ticket 1234 - Unparseable Hostname
+    result = utils.parse_url('http://5t4m59hl-34343.euw.devtunnels.ms')
+    assert result['schema'] == 'http'
+    assert result['host'] == '5t4m59hl-34343.euw.devtunnels.ms'
+    assert result['port'] is None
+    assert result['user'] is None
+    assert result['password'] is None
+    assert result['fullpath'] is None
+    assert result['path'] is None
+    assert result['query'] is None
+    assert result['url'] == 'http://5t4m59hl-34343.euw.devtunnels.ms'
     assert result['qsd'] == {}
     assert result['qsd-'] == {}
     assert result['qsd+'] == {}
@@ -396,6 +418,31 @@ def test_parse_url_general():
     assert result['qsd+']['KeY'] == 'ValueA'
     assert 'kEy' in result['qsd-']
     assert result['qsd-']['kEy'] == 'ValueB'
+    assert result['qsd']['key'] == 'Value +C'
+    assert result['qsd']['+key'] == result['qsd+']['KeY']
+    assert result['qsd']['-key'] == result['qsd-']['kEy']
+
+    result = utils.parse_url(
+        'http://hostname/?+KeY=ValueA&-kEy=ValueB&KEY=Value%20+C&:colon=y',
+        plus_to_space=True)
+    assert result['schema'] == 'http'
+    assert result['host'] == 'hostname'
+    assert result['port'] is None
+    assert result['user'] is None
+    assert result['password'] is None
+    assert result['fullpath'] == '/'
+    assert result['path'] == '/'
+    assert result['query'] is None
+    assert result['url'] == 'http://hostname/'
+    assert '+key' in result['qsd']
+    assert '-key' in result['qsd']
+    assert ':colon' in result['qsd']
+    assert result['qsd:']['colon'] == 'y'
+    assert 'key' in result['qsd']
+    assert 'KeY' in result['qsd+']
+    assert result['qsd+']['KeY'] == 'ValueA'
+    assert 'kEy' in result['qsd-']
+    assert result['qsd-']['kEy'] == 'ValueB'
     assert result['qsd']['key'] == 'Value  C'
     assert result['qsd']['+key'] == result['qsd+']['KeY']
     assert result['qsd']['-key'] == result['qsd-']['kEy']
@@ -689,6 +736,38 @@ def test_parse_url_general():
     assert result['qsd+'] == {}
     assert result['qsd:'] == {}
 
+    # Sanitizing
+    result = utils.parse_url(
+        'hTTp://hostname/?+KeY=ValueA&-kEy=ValueB&KEY=Value%20+C&:cOlON=YeS',
+        sanitize=False)
+
+    assert len(result['qsd-']) == 1
+    assert len(result['qsd+']) == 1
+    assert len(result['qsd']) == 4
+    assert len(result['qsd:']) == 1
+
+    assert result['schema'] == 'http'
+    assert result['host'] == 'hostname'
+    assert result['port'] is None
+    assert result['user'] is None
+    assert result['password'] is None
+    assert result['fullpath'] == '/'
+    assert result['path'] == '/'
+    assert result['query'] is None
+    assert result['url'] == 'http://hostname/'
+    assert '+KeY' in result['qsd']
+    assert '-kEy' in result['qsd']
+    assert ':cOlON' in result['qsd']
+    assert result['qsd:']['cOlON'] == 'YeS'
+    assert 'key' not in result['qsd']
+    assert 'KeY' in result['qsd+']
+    assert result['qsd+']['KeY'] == 'ValueA'
+    assert 'kEy' in result['qsd-']
+    assert result['qsd-']['kEy'] == 'ValueB'
+    assert result['qsd']['KEY'] == 'Value +C'
+    assert result['qsd']['+KeY'] == result['qsd+']['KeY']
+    assert result['qsd']['-kEy'] == result['qsd-']['kEy']
+
 
 def test_parse_url_simple():
     "utils: parse_url() testing """
@@ -893,7 +972,7 @@ def test_parse_url_simple():
     assert '-key' in result['qsd']
     assert ':colon' in result['qsd']
     assert result['qsd'][':colon'] == 'y'
-    assert result['qsd']['key'] == 'Value  C'
+    assert result['qsd']['key'] == 'Value +C'
     assert result['qsd']['+key'] == 'ValueA'
     assert result['qsd']['-key'] == 'ValueB'
 
@@ -1983,20 +2062,35 @@ def test_parse_list():
     ])
 
 
+def test_import_module(tmpdir):
+    """utils: import_module testing
+    """
+    # Prepare ourselves a file to work with
+    bad_file_base = tmpdir.mkdir('a')
+    bad_file = bad_file_base.join('README.md')
+    bad_file.write(cleandoc("""
+    I'm a README file, not a Python one.
+
+    I can't be loaded
+    """))
+    assert utils.import_module(str(bad_file), 'invalidfile1') is None
+    assert utils.import_module(str(bad_file_base), 'invalidfile2') is None
+
+
 def test_module_detection(tmpdir):
     """utils: test_module_detection() testing
     """
 
     # Clear our working variables so they don't obstruct with the tests here
-    utils.PATHS_PREVIOUSLY_SCANNED.clear()
-    common.NOTIFY_CUSTOM_MODULE_MAP.clear()
+    N_MGR._paths_previously_scanned.clear()
+    N_MGR._custom_module_map.clear()
 
     # Test case where we load invalid data
-    utils.module_detection(None)
+    N_MGR.module_detection(None)
 
     # Invalid data does not load anything
-    assert len(utils.PATHS_PREVIOUSLY_SCANNED) == 0
-    assert len(common.NOTIFY_CUSTOM_MODULE_MAP) == 0
+    assert len(N_MGR._paths_previously_scanned) == 0
+    assert len(N_MGR._custom_module_map) == 0
 
     # Prepare ourselves a file to work with
     notify_hook_a_base = tmpdir.mkdir('a')
@@ -2009,29 +2103,35 @@ def test_module_detection(tmpdir):
         pass
     """))
 
+    notify_ignore = notify_hook_a_base.join('README.md')
+    notify_ignore.write(cleandoc("""
+    We're not a .py file, so this file gets gracefully skipped
+    """))
+
     # Not previously loaded
-    assert 'clihook' not in common.NOTIFY_SCHEMA_MAP
+    assert 'clihook' not in N_MGR
 
     # load entry by string
-    utils.module_detection(str(notify_hook_a))
+    N_MGR.module_detection(str(notify_hook_a))
+    N_MGR.module_detection(str(notify_ignore))
+    N_MGR.module_detection(str(notify_hook_a_base))
 
-    assert len(utils.PATHS_PREVIOUSLY_SCANNED) == 1
-    assert len(common.NOTIFY_CUSTOM_MODULE_MAP) == 1
+    assert len(N_MGR._paths_previously_scanned) == 3
+    assert len(N_MGR._custom_module_map) == 1
 
     # Now loaded
-    assert 'clihook' in common.NOTIFY_SCHEMA_MAP
+    assert 'clihook' in N_MGR
 
     # load entry by array
-    utils.module_detection([str(notify_hook_a)])
+    N_MGR.module_detection([str(notify_hook_a)])
 
     # No changes to our path
-    assert len(utils.PATHS_PREVIOUSLY_SCANNED) == 1
-    assert len(common.NOTIFY_CUSTOM_MODULE_MAP) == 1
+    assert len(N_MGR._paths_previously_scanned) == 3
+    assert len(N_MGR._custom_module_map) == 1
 
     # Reset our variables for the next test
-    utils.PATHS_PREVIOUSLY_SCANNED.clear()
-    common.NOTIFY_CUSTOM_MODULE_MAP.clear()
-    del common.NOTIFY_SCHEMA_MAP['clihook']
+    N_MGR._paths_previously_scanned.clear()
+    N_MGR._custom_module_map.clear()
 
     # Hidden files are ignored
     notify_hook_b_base = tmpdir.mkdir('b')
@@ -2045,36 +2145,36 @@ def test_module_detection(tmpdir):
         pass
     """))
 
-    assert 'hidden' not in common.NOTIFY_SCHEMA_MAP
+    assert 'hidden' not in N_MGR
 
-    utils.module_detection([str(notify_hook_b)])
+    N_MGR.module_detection([str(notify_hook_b)])
 
     # Verify that it did not load
-    assert 'hidden' not in common.NOTIFY_SCHEMA_MAP
+    assert 'hidden' not in N_MGR
 
     # Path was scanned; nothing loaded
-    assert len(utils.PATHS_PREVIOUSLY_SCANNED) == 1
-    assert len(common.NOTIFY_CUSTOM_MODULE_MAP) == 0
+    assert len(N_MGR._paths_previously_scanned) == 1
+    assert len(N_MGR._custom_module_map) == 0
 
     # Reset our variables for the next test
-    utils.PATHS_PREVIOUSLY_SCANNED.clear()
-    common.NOTIFY_CUSTOM_MODULE_MAP.clear()
+    N_MGR._paths_previously_scanned.clear()
+    N_MGR._custom_module_map.clear()
 
     # modules with no hooks found are ignored
     notify_hook_c_base = tmpdir.mkdir('c')
     notify_hook_c = notify_hook_c_base.join('empty.py')
     notify_hook_c.write("")
 
-    utils.module_detection([str(notify_hook_c)])
+    N_MGR.module_detection([str(notify_hook_c)])
 
     # File was found, no custom modules
-    assert len(utils.PATHS_PREVIOUSLY_SCANNED) == 1
-    assert len(common.NOTIFY_CUSTOM_MODULE_MAP) == 0
+    assert len(N_MGR._paths_previously_scanned) == 1
+    assert len(N_MGR._custom_module_map) == 0
 
     # A new path scanned
-    utils.module_detection([str(notify_hook_c_base)])
-    assert len(utils.PATHS_PREVIOUSLY_SCANNED) == 2
-    assert len(common.NOTIFY_CUSTOM_MODULE_MAP) == 0
+    N_MGR.module_detection([str(notify_hook_c_base)])
+    assert len(N_MGR._paths_previously_scanned) == 2
+    assert len(N_MGR._custom_module_map) == 0
 
     def create_hook(tdir, cache=True, on="valid1"):
         """
@@ -2090,39 +2190,39 @@ def test_module_detection(tmpdir):
             pass
         """.format(on)))
 
-        utils.module_detection([str(tdir)], cache=cache)
+        N_MGR.module_detection([str(tdir)], cache=cache)
 
     create_hook(notify_hook_c, on='valid1')
-    assert 'valid1' not in common.NOTIFY_SCHEMA_MAP
+    assert 'valid1' not in N_MGR
 
     # Even if we correct our empty file; the fact the directory has been
     # scanned and failed to load (same with file), it won't be loaded
     # a second time. This is intentional since module_detection() get's
     # called for every AppriseAsset() object creation.  This prevents us
     # from reloading conent over and over again wasting resources
-    assert 'valid1' not in common.NOTIFY_SCHEMA_MAP
-    utils.module_detection([str(notify_hook_c)])
-    assert len(utils.PATHS_PREVIOUSLY_SCANNED) == 2
-    assert len(common.NOTIFY_CUSTOM_MODULE_MAP) == 0
+    assert 'valid1' not in N_MGR
+    N_MGR.module_detection([str(notify_hook_c)])
+    assert len(N_MGR._paths_previously_scanned) == 2
+    assert len(N_MGR._custom_module_map) == 0
 
     # Even by absolute path...
-    utils.module_detection([str(notify_hook_c)])
-    assert 'valid1' not in common.NOTIFY_SCHEMA_MAP
-    assert len(utils.PATHS_PREVIOUSLY_SCANNED) == 2
-    assert len(common.NOTIFY_CUSTOM_MODULE_MAP) == 0
+    N_MGR.module_detection([str(notify_hook_c)])
+    assert 'valid1' not in N_MGR
+    assert len(N_MGR._paths_previously_scanned) == 2
+    assert len(N_MGR._custom_module_map) == 0
 
     # However we can bypass the cache if we really want to
-    utils.module_detection([str(notify_hook_c_base)], cache=False)
-    assert 'valid1' in common.NOTIFY_SCHEMA_MAP
-    assert len(utils.PATHS_PREVIOUSLY_SCANNED) == 2
-    assert len(common.NOTIFY_CUSTOM_MODULE_MAP) == 1
+    N_MGR.module_detection([str(notify_hook_c_base)], cache=False)
+    assert 'valid1' in N_MGR
+    assert len(N_MGR._paths_previously_scanned) == 2
+    assert len(N_MGR._custom_module_map) == 1
 
     # Bypassing it twice causes the module to load twice (not very efficient)
     # However we can bypass the cache if we really want to
-    utils.module_detection([str(notify_hook_c_base)], cache=False)
-    assert 'valid1' in common.NOTIFY_SCHEMA_MAP
-    assert len(utils.PATHS_PREVIOUSLY_SCANNED) == 2
-    assert len(common.NOTIFY_CUSTOM_MODULE_MAP) == 1
+    N_MGR.module_detection([str(notify_hook_c_base)], cache=False)
+    assert 'valid1' in N_MGR
+    assert len(N_MGR._paths_previously_scanned) == 2
+    assert len(N_MGR._custom_module_map) == 1
 
     # If you update the module (corrupting it in the process and reload)
     notify_hook_c.write(cleandoc("""
@@ -2130,50 +2230,50 @@ def test_module_detection(tmpdir):
     """))
 
     # Force no cache to cause the file to be replaced
-    utils.module_detection([str(notify_hook_c_base)], cache=False)
+    N_MGR.module_detection([str(notify_hook_c_base)], cache=False)
 
     # Our valid entry is no longer loaded
-    assert 'valid1' not in common.NOTIFY_SCHEMA_MAP
+    assert 'valid1' not in N_MGR
 
     # No change to scanned paths
-    assert len(utils.PATHS_PREVIOUSLY_SCANNED) == 2
+    assert len(N_MGR._paths_previously_scanned) == 2
     # The previously loaded module is now gone
-    assert len(common.NOTIFY_CUSTOM_MODULE_MAP) == 0
+    assert len(N_MGR._custom_module_map) == 0
 
     # Reload our valid1 entry
     create_hook(notify_hook_c, on='valid1', cache=False)
-    assert 'valid1' in common.NOTIFY_SCHEMA_MAP
-    assert len(utils.PATHS_PREVIOUSLY_SCANNED) == 2
-    assert len(common.NOTIFY_CUSTOM_MODULE_MAP) == 1
+    assert 'valid1' in N_MGR
+    assert len(N_MGR._paths_previously_scanned) == 2
+    assert len(N_MGR._custom_module_map) == 1
 
     # Prepare an empty file
     notify_hook_c.write("")
-    utils.module_detection([str(notify_hook_c_base)], cache=False)
+    N_MGR.module_detection([str(notify_hook_c_base)], cache=False)
 
     # Our valid entry is no longer loaded
-    assert 'valid1' not in common.NOTIFY_SCHEMA_MAP
-    assert len(utils.PATHS_PREVIOUSLY_SCANNED) == 2
-    assert len(common.NOTIFY_CUSTOM_MODULE_MAP) == 0
+    assert 'valid1' not in N_MGR
+    assert len(N_MGR._paths_previously_scanned) == 2
+    assert len(N_MGR._custom_module_map) == 0
 
     # Now reload our module again (this time rather then an exception, the
     # module is read back and swaps `valid1` for `valid2`
     create_hook(notify_hook_c, on='valid1', cache=False)
-    assert 'valid1' in common.NOTIFY_SCHEMA_MAP
-    assert 'valid2' not in common.NOTIFY_SCHEMA_MAP
-    assert len(utils.PATHS_PREVIOUSLY_SCANNED) == 2
-    assert len(common.NOTIFY_CUSTOM_MODULE_MAP) == 1
+    assert 'valid1' in N_MGR
+    assert 'valid2' not in N_MGR
+    assert len(N_MGR._paths_previously_scanned) == 2
+    assert len(N_MGR._custom_module_map) == 1
 
     create_hook(notify_hook_c, on='valid2', cache=False)
-    assert 'valid1' not in common.NOTIFY_SCHEMA_MAP
-    assert 'valid2' in common.NOTIFY_SCHEMA_MAP
-    assert len(utils.PATHS_PREVIOUSLY_SCANNED) == 2
-    assert len(common.NOTIFY_CUSTOM_MODULE_MAP) == 1
+    assert 'valid1' not in N_MGR
+    assert 'valid2' in N_MGR
+    assert len(N_MGR._paths_previously_scanned) == 2
+    assert len(N_MGR._custom_module_map) == 1
 
     # Reset our variables for the next test
     create_hook(notify_hook_c, on='valid1', cache=False)
-    del common.NOTIFY_SCHEMA_MAP['valid1']
-    utils.PATHS_PREVIOUSLY_SCANNED.clear()
-    common.NOTIFY_CUSTOM_MODULE_MAP.clear()
+    del N_MGR['valid1']
+    N_MGR._paths_previously_scanned.clear()
+    N_MGR._custom_module_map.clear()
 
     notify_hook_d = notify_hook_c_base.join('.ignore.py')
     notify_hook_d.write("")
@@ -2192,71 +2292,71 @@ def test_module_detection(tmpdir):
     # Try to load our base directory again; this time we search by the
     # directory; the only edge case we're testing here is it will not
     # even look at the .ignore.py file found since it is invalid
-    utils.module_detection([str(notify_hook_c_base)])
-    assert 'valid1' in common.NOTIFY_SCHEMA_MAP
-    assert len(utils.PATHS_PREVIOUSLY_SCANNED) == 2
-    assert len(common.NOTIFY_CUSTOM_MODULE_MAP) == 1
+    N_MGR.module_detection([str(notify_hook_c_base)])
+    assert 'valid1' in N_MGR
+    assert len(N_MGR._paths_previously_scanned) == 2
+    assert len(N_MGR._custom_module_map) == 1
 
     # Reset our variables for the next test
-    del common.NOTIFY_SCHEMA_MAP['valid1']
-    utils.PATHS_PREVIOUSLY_SCANNED.clear()
-    common.NOTIFY_CUSTOM_MODULE_MAP.clear()
+    del N_MGR._schema_map['valid1']
+    N_MGR._paths_previously_scanned.clear()
+    N_MGR._custom_module_map.clear()
 
     # Try to load our base directory again
-    utils.module_detection([str(notify_hook_c)])
-    assert 'valid1' in common.NOTIFY_SCHEMA_MAP
+    N_MGR.module_detection([str(notify_hook_c)])
+    assert 'valid1' in N_MGR
 
     # Hidden directories are not scanned
-    assert 'valid2' not in common.NOTIFY_SCHEMA_MAP
+    assert 'valid2' not in N_MGR
 
-    assert len(utils.PATHS_PREVIOUSLY_SCANNED) == 1
-    assert str(notify_hook_c) in utils.PATHS_PREVIOUSLY_SCANNED
-    assert len(common.NOTIFY_CUSTOM_MODULE_MAP) == 1
+    assert len(N_MGR._paths_previously_scanned) == 1
+    assert str(notify_hook_c) in N_MGR._paths_previously_scanned
+    assert len(N_MGR._custom_module_map) == 1
 
     # However a direct reference to the hidden directory is okay
-    utils.module_detection([str(notify_hook_e_base)])
+    N_MGR.module_detection([str(notify_hook_e_base)])
 
     # We loaded our module
-    assert 'valid2' in common.NOTIFY_SCHEMA_MAP
-    assert len(utils.PATHS_PREVIOUSLY_SCANNED) == 3
-    assert str(notify_hook_c) in utils.PATHS_PREVIOUSLY_SCANNED
-    assert str(notify_hook_e) in utils.PATHS_PREVIOUSLY_SCANNED
-    assert str(notify_hook_e_base) in utils.PATHS_PREVIOUSLY_SCANNED
-    assert len(common.NOTIFY_CUSTOM_MODULE_MAP) == 2
+    assert 'valid2' in N_MGR
+    assert len(N_MGR._paths_previously_scanned) == 3
+    assert str(notify_hook_c) in N_MGR._paths_previously_scanned
+    assert str(notify_hook_e) in N_MGR._paths_previously_scanned
+    assert str(notify_hook_e_base) in N_MGR._paths_previously_scanned
+    assert len(N_MGR._custom_module_map) == 2
 
     # Reset our variables for the next test
-    del common.NOTIFY_SCHEMA_MAP['valid1']
-    del common.NOTIFY_SCHEMA_MAP['valid2']
-    utils.PATHS_PREVIOUSLY_SCANNED.clear()
-    common.NOTIFY_CUSTOM_MODULE_MAP.clear()
+    del N_MGR._schema_map['valid1']
+    del N_MGR._schema_map['valid2']
+    N_MGR._paths_previously_scanned.clear()
+    N_MGR._custom_module_map.clear()
 
     # Load our file directly
-    assert 'valid2' not in common.NOTIFY_SCHEMA_MAP
-    utils.module_detection([str(notify_hook_e)])
+    assert 'valid2' not in N_MGR
+    N_MGR.module_detection([str(notify_hook_e)])
 
     # Now we have it loaded as expected
-    assert 'valid2' in common.NOTIFY_SCHEMA_MAP
-    assert len(utils.PATHS_PREVIOUSLY_SCANNED) == 1
-    assert str(notify_hook_e) in utils.PATHS_PREVIOUSLY_SCANNED
-    assert len(common.NOTIFY_CUSTOM_MODULE_MAP) == 1
+    assert 'valid2' in N_MGR
+    assert len(N_MGR._paths_previously_scanned) == 1
+    assert str(notify_hook_e) in N_MGR._paths_previously_scanned
+    assert len(N_MGR._custom_module_map) == 1
 
     # however if we try to load the base directory where the __init__.py
     # was already loaded from, it will not change anything
-    utils.module_detection([str(notify_hook_e_base)])
-    assert 'valid2' in common.NOTIFY_SCHEMA_MAP
-    assert len(utils.PATHS_PREVIOUSLY_SCANNED) == 2
-    assert str(notify_hook_e) in utils.PATHS_PREVIOUSLY_SCANNED
-    assert str(notify_hook_e_base) in utils.PATHS_PREVIOUSLY_SCANNED
-    assert len(common.NOTIFY_CUSTOM_MODULE_MAP) == 1
+    N_MGR.module_detection([str(notify_hook_e_base)])
+    assert 'valid2' in N_MGR
+    assert len(N_MGR._paths_previously_scanned) == 2
+    assert str(notify_hook_e) in N_MGR._paths_previously_scanned
+    assert str(notify_hook_e_base) in N_MGR._paths_previously_scanned
+    assert len(N_MGR._custom_module_map) == 1
 
     # Tidy up for the next test
-    del common.NOTIFY_SCHEMA_MAP['valid2']
-    utils.PATHS_PREVIOUSLY_SCANNED.clear()
-    common.NOTIFY_CUSTOM_MODULE_MAP.clear()
+    del N_MGR._schema_map['valid2']
+    N_MGR._paths_previously_scanned.clear()
+    N_MGR._custom_module_map.clear()
 
-    assert 'valid1' not in common.NOTIFY_SCHEMA_MAP
-    assert 'valid2' not in common.NOTIFY_SCHEMA_MAP
-    assert 'valid3' not in common.NOTIFY_SCHEMA_MAP
+    assert 'valid1' not in N_MGR
+    assert 'valid2' not in N_MGR
+    assert 'valid3' not in N_MGR
     notify_hook_f_base = tmpdir.mkdir('f')
     notify_hook_f = notify_hook_f_base.join('invalid.py')
     notify_hook_f.write(cleandoc("""
@@ -2285,20 +2385,20 @@ def test_module_detection(tmpdir):
 
     """))
 
-    utils.module_detection([str(notify_hook_f)])
+    N_MGR.module_detection([str(notify_hook_f)])
 
-    assert len(utils.PATHS_PREVIOUSLY_SCANNED) == 1
-    assert len(common.NOTIFY_CUSTOM_MODULE_MAP) == 1
-    assert 'valid1' in common.NOTIFY_SCHEMA_MAP
-    assert 'valid2' in common.NOTIFY_SCHEMA_MAP
-    assert 'valid3' in common.NOTIFY_SCHEMA_MAP
+    assert len(N_MGR._paths_previously_scanned) == 1
+    assert len(N_MGR._custom_module_map) == 1
+    assert 'valid1' in N_MGR
+    assert 'valid2' in N_MGR
+    assert 'valid3' in N_MGR
 
     # Reset our variables for the next test
-    del common.NOTIFY_SCHEMA_MAP['valid1']
-    del common.NOTIFY_SCHEMA_MAP['valid2']
-    del common.NOTIFY_SCHEMA_MAP['valid3']
-    utils.PATHS_PREVIOUSLY_SCANNED.clear()
-    common.NOTIFY_CUSTOM_MODULE_MAP.clear()
+    del N_MGR._schema_map['valid1']
+    del N_MGR._schema_map['valid2']
+    del N_MGR._schema_map['valid3']
+    N_MGR._paths_previously_scanned.clear()
+    N_MGR._custom_module_map.clear()
 
     # Now test the handling of just bad data entirely
     notify_hook_g_base = tmpdir.mkdir('g')
@@ -2306,13 +2406,13 @@ def test_module_detection(tmpdir):
     with open(str(notify_hook_g), 'wb') as fout:
         fout.write(os.urandom(512))
 
-    utils.module_detection([str(notify_hook_g)])
-    assert len(utils.PATHS_PREVIOUSLY_SCANNED) == 1
-    assert len(common.NOTIFY_CUSTOM_MODULE_MAP) == 0
+    N_MGR.module_detection([str(notify_hook_g)])
+    assert len(N_MGR._paths_previously_scanned) == 1
+    assert len(N_MGR._custom_module_map) == 0
 
     # Reset our variables before we leave
-    utils.PATHS_PREVIOUSLY_SCANNED.clear()
-    common.NOTIFY_CUSTOM_MODULE_MAP.clear()
+    N_MGR._paths_previously_scanned.clear()
+    N_MGR._custom_module_map.clear()
 
 
 def test_exclusive_match():
@@ -2461,93 +2561,6 @@ def test_apprise_validate_regex():
         "- abcd -", r'-(?P<value>[ABCD]+)-', None, fmt="{value}") is None
 
 
-def test_environ_temporary_change():
-    """utils: environ() testing
-    """
-
-    e_key1 = 'APPRISE_TEMP1'
-    e_key2 = 'APPRISE_TEMP2'
-    e_key3 = 'APPRISE_TEMP3'
-
-    e_val1 = 'ABCD'
-    e_val2 = 'DEFG'
-    e_val3 = 'HIJK'
-
-    os.environ[e_key1] = e_val1
-    os.environ[e_key2] = e_val2
-    os.environ[e_key3] = e_val3
-
-    # Ensure our environment variable stuck
-    assert e_key1 in os.environ
-    assert e_val1 in os.environ[e_key1]
-    assert e_key2 in os.environ
-    assert e_val2 in os.environ[e_key2]
-    assert e_key3 in os.environ
-    assert e_val3 in os.environ[e_key3]
-
-    with utils.environ(e_key1, e_key3):
-        # Eliminates Environment Variable 1 and 3
-        assert e_key1 not in os.environ
-        assert e_key2 in os.environ
-        assert e_val2 in os.environ[e_key2]
-        assert e_key3 not in os.environ
-
-    # after with is over, environment is restored to normal
-    assert e_key1 in os.environ
-    assert e_val1 in os.environ[e_key1]
-    assert e_key2 in os.environ
-    assert e_val2 in os.environ[e_key2]
-    assert e_key3 in os.environ
-    assert e_val3 in os.environ[e_key3]
-
-    d_key = 'APPRISE_NOT_SET'
-    n_key = 'APPRISE_NEW_KEY'
-    n_val = 'NEW_VAL'
-
-    # Verify that our temporary variables (defined above) are not pre-existing
-    # environemnt variables as we'll be setting them below
-    assert n_key not in os.environ
-    assert d_key not in os.environ
-
-    # makes it easier to pass in the arguments
-    updates = {
-        e_key1: e_val3,
-        e_key2: e_val1,
-        n_key: n_val,
-    }
-    with utils.environ(d_key, e_key3, **updates):
-        # Attempt to eliminate an undefined key (silently ignored)
-        # Eliminates Environment Variable 3
-        # Environment Variable 1 takes on the value of Env 3
-        # Environment Variable 2 takes on the value of Env 1
-        # Set a brand new variable that previously didn't exist
-        assert e_key1 in os.environ
-        assert e_val3 in os.environ[e_key1]
-        assert e_key2 in os.environ
-        assert e_val1 in os.environ[e_key2]
-        assert e_key3 not in os.environ
-
-        # Can't delete a variable that doesn't exist; so we're in the same
-        # state here.
-        assert d_key not in os.environ
-
-        # Our temporary variables will be found now
-        assert n_key in os.environ
-        assert n_val in os.environ[n_key]
-
-    # after with is over, environment is restored to normal
-    assert e_key1 in os.environ
-    assert e_val1 in os.environ[e_key1]
-    assert e_key2 in os.environ
-    assert e_val2 in os.environ[e_key2]
-    assert e_key3 in os.environ
-    assert e_val3 in os.environ[e_key3]
-
-    # Even our temporary variables are now missing
-    assert n_key not in os.environ
-    assert d_key not in os.environ
-
-
 def test_apply_templating():
     """utils: apply_template() testing
     """
@@ -2556,39 +2569,39 @@ def test_apply_templating():
 
     result = utils.apply_template(
         template, **{'fname': 'Chris', 'whence': 'this morning'})
-    assert isinstance(result, str) is True
+    assert isinstance(result, str)
     assert result == "Hello Chris, How are you this morning?"
 
     # In this example 'whence' isn't provided, so it isn't swapped
     result = utils.apply_template(
         template, **{'fname': 'Chris'})
-    assert isinstance(result, str) is True
+    assert isinstance(result, str)
     assert result == "Hello Chris, How are you {{whence}}?"
 
     # white space won't cause any ill affects:
     template = "Hello {{ fname }}, How are you {{   whence}}?"
     result = utils.apply_template(
         template, **{'fname': 'Chris', 'whence': 'this morning'})
-    assert isinstance(result, str) is True
+    assert isinstance(result, str)
     assert result == "Hello Chris, How are you this morning?"
 
     # No arguments won't cause any problems
     template = "Hello {{fname}}, How are you {{whence}}?"
     result = utils.apply_template(template)
-    assert isinstance(result, str) is True
+    assert isinstance(result, str)
     assert result == template
 
     # Wrong elements are simply ignored
     result = utils.apply_template(
         template,
         **{'fname': 'l2g', 'whence': 'this evening', 'ignore': 'me'})
-    assert isinstance(result, str) is True
+    assert isinstance(result, str)
     assert result == "Hello l2g, How are you this evening?"
 
     # Empty template makes things easy
     result = utils.apply_template(
         "", **{'fname': 'l2g', 'whence': 'this evening'})
-    assert isinstance(result, str) is True
+    assert isinstance(result, str)
     assert result == ""
 
     # Regular expressions are safely escapped and act as normal
@@ -2651,18 +2664,180 @@ def test_cwe312_url():
         'http://user@localhost?secret=secret-.12345') == \
         'http://user@localhost?secret=s...5'
 
-    # Now test other:// private data
-    assert utils.cwe312_url(
-        'gitter://b5637831f563aa846bb5b2c27d8fe8f633b8f026/apprise') == \
-        'gitter://b...6/apprise'
-    assert utils.cwe312_url(
-        'gitter://b5637831f563aa846bb5b2c27d8fe8f633b8f026'
-        '/apprise/?pass=abc123') == \
-        'gitter://b...6/apprise/?pass=a...3'
-
     assert utils.cwe312_url(
         'slack://mybot@xoxb-43598234231-3248932482278-BZK5Wj15B9mPh1RkShJoCZ44'
         '/lead2gold@gmail.com') == 'slack://mybot@x...4/l...m'
     assert utils.cwe312_url(
         'slack://test@B4QP3WWB4/J3QWT41JM/XIl2ffpqXkzkwMXrJdevi7W3/'
         '#random') == 'slack://test@B...4/J...M/X...3/'
+
+
+def test_dict_base64_codec(tmpdir):
+    """
+    Test encoding/decoding of base64 content
+    """
+    original = {
+        'int': 1,
+        'float': 2.3,
+    }
+
+    encoded, needs_decoding = utils.encode_b64_dict(original)
+    assert encoded == {'int': 'b64:MQ==', 'float': 'b64:Mi4z'}
+    assert needs_decoding is True
+    decoded = utils.decode_b64_dict(encoded)
+    assert decoded == original
+
+    with mock.patch('json.dumps', side_effect=TypeError()):
+        encoded, needs_decoding = utils.encode_b64_dict(original)
+        # we failed
+        assert needs_decoding is False
+        assert encoded == {
+            'int': '1',
+            'float': '2.3',
+        }
+
+
+def test_dir_size(tmpdir):
+    """
+    Test dir size tool
+    """
+
+    # Nothing to find/see
+    size, _errors = utils.dir_size(str(tmpdir))
+    assert size == 0
+    assert len(_errors) == 0
+
+    # Write a file in our root directory
+    tmpdir.join('root.psdata').write('0' * 1024 * 1024)
+
+    # Prepare some more directories
+    namespace_1 = tmpdir.mkdir('abcdefg')
+    namespace_2 = tmpdir.mkdir('defghij')
+    namespace_2.join('cache.psdata').write('0' * 1024 * 1024)
+    size, _errors = utils.dir_size(str(tmpdir))
+    assert size == 1024 * 1024 * 2
+    assert len(_errors) == 0
+
+    # Write another file
+    namespace_1.join('cache.psdata').write('0' * 1024 * 1024)
+    size, _errors = utils.dir_size(str(tmpdir))
+    assert size == 1024 * 1024 * 3
+    assert len(_errors) == 0
+
+    size, _errors = utils.dir_size(str(namespace_1))
+    assert size == 1024 * 1024
+    assert len(_errors) == 0
+
+    # Create a directory insde one of our namespaces
+    subspace_1 = namespace_1.mkdir('zyx')
+    size, _errors = utils.dir_size(str(namespace_1))
+    assert size == 1024 * 1024
+
+    subspace_1.join('cache.psdata').write('0' * 1024 * 1024)
+    size, _errors = utils.dir_size(str(tmpdir))
+    assert size == 1024 * 1024 * 4
+    assert len(_errors) == 0
+
+    # Recursion limit reduced... no change at 2 as we can go 2
+    # diretories deep no problem
+    size, _errors = utils.dir_size(str(tmpdir), max_depth=2)
+    assert size == 1024 * 1024 * 4
+    assert len(_errors) == 0
+
+    size, _errors = utils.dir_size(str(tmpdir), max_depth=1)
+    assert size == 1024 * 1024 * 3
+    # we can't get into our subspace_1
+    assert len(_errors) == 1
+    assert str(subspace_1) in _errors
+
+    size, _errors = utils.dir_size(str(tmpdir), max_depth=0)
+    assert size == 1024 * 1024
+    # we can't get into our namespace directories
+    assert len(_errors) == 2
+    assert str(namespace_1) in _errors
+    assert str(namespace_2) in _errors
+
+    # Let's cause problems now and test the output
+    size, _errors = utils.dir_size('invalid-directory', missing_okay=True)
+    assert size == 0
+    assert len(_errors) == 0
+
+    size, _errors = utils.dir_size('invalid-directory', missing_okay=False)
+    assert size == 0
+    assert len(_errors) == 1
+    assert 'invalid-directory' in _errors
+
+    with mock.patch('os.scandir', side_effect=OSError()):
+        size, _errors = utils.dir_size(str(tmpdir), missing_okay=True)
+        assert size == 0
+        assert len(_errors) == 1
+        assert str(tmpdir) in _errors
+
+    with mock.patch('os.scandir') as mock_scandir:
+        mock_entry = mock.MagicMock()
+        mock_entry.is_file.side_effect = OSError()
+        mock_entry.path = '/test/path'
+        # Mock the scandir return value to yield the mock entry
+        mock_scandir.return_value.__enter__.return_value = [mock_entry]
+
+        size, _errors = utils.dir_size(str(tmpdir))
+        assert size == 0
+        assert len(_errors) == 1
+        assert mock_entry.path in _errors
+
+    with mock.patch('os.scandir') as mock_scandir:
+        mock_entry = mock.MagicMock()
+        mock_entry.is_file.return_value = False
+        mock_entry.is_dir.side_effect = OSError()
+        mock_entry.path = '/test/path'
+        # Mock the scandir return value to yield the mock entry
+        mock_scandir.return_value.__enter__.return_value = [mock_entry]
+        size, _errors = utils.dir_size(str(tmpdir))
+        assert len(_errors) == 1
+        assert mock_entry.path in _errors
+
+    with mock.patch('os.scandir') as mock_scandir:
+        mock_entry = mock.MagicMock()
+        mock_entry.is_file.return_value = False
+        mock_entry.is_dir.return_value = False
+        # Mock the scandir return value to yield the mock entry
+        mock_scandir.return_value.__enter__.return_value = [mock_entry]
+        size, _errors = utils.dir_size(str(tmpdir))
+        assert size == 0
+        assert len(_errors) == 0
+
+    with mock.patch('os.scandir') as mock_scandir:
+        mock_entry = mock.MagicMock()
+        mock_entry.is_file.side_effect = FileNotFoundError()
+        mock_entry.path = '/test/path'
+        # Mock the scandir return value to yield the mock entry
+        mock_scandir.return_value.__enter__.return_value = [mock_entry]
+
+        size, _errors = utils.dir_size(str(tmpdir))
+        assert size == 0
+        # No file isn't a problem, we're calculating disksize anyway,
+        # one less thing to calculate
+        assert len(_errors) == 0
+
+
+def test_bytes_to_str():
+    """
+    Test Bytes to String representation
+    """
+    # Garbage Entry
+    assert utils.bytes_to_str(None) is None
+    assert utils.bytes_to_str('') is None
+    assert utils.bytes_to_str('GARBAGE') is None
+
+    # Good Entries
+    assert utils.bytes_to_str(0) == "0.00B"
+    assert utils.bytes_to_str(1) == "1.00B"
+    assert utils.bytes_to_str(1.1) == "1.10B"
+    assert utils.bytes_to_str(1024) == "1.00KB"
+    assert utils.bytes_to_str(1024 * 1024) == "1.00MB"
+    assert utils.bytes_to_str(1024 * 1024 * 1024) == "1.00GB"
+    assert utils.bytes_to_str(1024 * 1024 * 1024 * 1024) == "1.00TB"
+
+    # Support strings too
+    assert utils.bytes_to_str("0") == "0.00B"
+    assert utils.bytes_to_str("1024") == "1.00KB"
